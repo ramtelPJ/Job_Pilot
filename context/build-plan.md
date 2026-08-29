@@ -66,15 +66,11 @@ All InsForge tables and storage bucket created before any data is written.
 
 **Logic:**
 
-- Create `profiles` table with all columns from architecture.md
-- Create `agent_runs` table
-- Create `jobs` table with all columns including:
-  - tailored fields
-  - company_research jsonb column
-  - source values: 'search' | 'url'
-- Create `agent_logs` table
-- Create `resumes` storage bucket with authenticated access only
-- Row level security policies on all four tables — always filter by user_id
+Built. See `docs/specs/0001-core-data-schema.md` for the full decision record.
+
+- Created `profiles`, `agent_runs`, `jobs`, `agent_logs` tables with all columns from architecture.md, plus CHECK constraints on `jobs.source` (always `'search'` — `url` dropped, URL import is out of scope), `agent_runs.status`, and `agent_logs.level`
+- Created `resumes` storage bucket, private (`isPublic: false`)
+- Row level security enabled on all four tables, one `auth.uid() = user_id` policy each (`= id` on profiles) — enforced at the database, not only by remembering to filter every query
 
 ---
 

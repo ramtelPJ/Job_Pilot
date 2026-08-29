@@ -201,6 +201,8 @@ URL saved to profiles table
 
 ## InsForge Database Schema
 
+Built. See `docs/specs/0001-core-data-schema.md` for the full decision record (why RLS instead of app-only filtering, the `jobs.source`/`run_id` resolution, cascade behavior). All four tables below have row level security enabled, one `FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id)` policy each (`= id` on `profiles`), and an index on every foreign key column plus `jobs(found_at desc)` and `jobs(match_score)`.
+
 ### `profiles`
 
 | Column              | Type        | Notes                                        |
@@ -236,7 +238,7 @@ URL saved to profiles table
 | ------------------ | ----------- | ---------------------------- |
 | id                 | uuid        |                              |
 | user_id            | uuid        | References profiles          |
-| status             | text        | running / completed / failed |
+| status             | text        | running / completed / failed — `CHECK (status IN (...))` |
 | job_title_searched | text        |                              |
 | location_searched  | text        |                              |
 | jobs_found         | integer     | Total jobs discovered        |
@@ -248,9 +250,9 @@ URL saved to profiles table
 | Column             | Type        | Notes                                          |
 | ------------------ | ----------- | ---------------------------------------------- |
 | id                 | uuid        |                                                |
-| run_id             | uuid        | References agent_runs — null if from URL input |
+| run_id             | uuid        | References agent_runs — not null (URL import is out of scope; there is no path that leaves this null) |
 | user_id            | uuid        | References profiles                            |
-| source             | text        | search / url                                   |
+| source             | text        | Always `search` — `CHECK (source = 'search')`. Was `search \| url`; `url` was dropped since manual URL import is out of scope |
 | source_url         | text        | Original job listing URL                       |
 | external_apply_url | text        | Direct company apply URL                       |
 | title              | text        |                                                |
@@ -279,8 +281,8 @@ URL saved to profiles table
 | run_id     | uuid        | References agent_runs            |
 | user_id    | uuid        | References profiles              |
 | message    | text        | Human readable log entry         |
-| level      | text        | info / success / warning / error |
-| job_id     | uuid        | Optional — related job           |
+| level      | text        | info / success / warning / error — `CHECK (level IN (...))` |
+| job_id     | uuid        | Optional — related job, `ON DELETE SET NULL` (the log line outlives a deleted job) |
 | created_at | timestamptz |                                  |
 
 ---
@@ -291,7 +293,7 @@ URL saved to profiles table
 | ------- | ---------------------------- | ------------------------- |
 | resumes | resumes/{user_id}/resume.pdf | Current active resume PDF |
 
-Access: authenticated users only, own files only.
+Built as a private bucket (`isPublic: false`) — authentication required for any access. Whether InsForge additionally scopes access by object path (so one user cannot guess another's resume URL) was not confirmed from the SDK docs; verify this when resume upload is actually built (Feature 08) and add an application layer path check if it does not.
 
 ---
 
@@ -462,4 +464,4 @@ Rules the AI agent must never violate:
 - Browserbase sessions are always closed with stagehand.close() when done — never leave sessions open.
 - Always scope InsForge queries to the current user_id — never query without a user filter.
 - Adzuna API always includes category=it-jobs — never search without this filter.
-- jobs.source is always 'search' or 'url' — never any other value.
+- jobs.source is always 'search' — enforced by a database CHECK constraint, not only application code. URL import is out of scope, so 'url' is not a valid value.

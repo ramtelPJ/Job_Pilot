@@ -85,9 +85,9 @@ Row level security is the right enforcement layer specifically because of how th
 |---|---|---|
 | `auth.users` | InsForge managed; `id` is `uuid` | 1 to 1 with `profiles` |
 | `profiles` | `id` uuid, primary key, foreign key to `auth.users.id`, **on delete cascade**; plus all fields already listed in `architecture.md` (full_name, email, phone, location, current_title, experience_level, years_experience, skills text array, industries text array, work_experience jsonb, education jsonb, job_titles_seeking text array, remote_preference, preferred_locations text array, salary_expectation, cover_letter_tone, linkedin_url, portfolio_url, work_authorization, resume_pdf_url, is_complete boolean not null default false, created_at, updated_at) | 1 to many with `agent_runs`, `jobs`, `agent_logs` |
-| `agent_runs` | `id` uuid primary key default `gen_random_uuid()`; `user_id` uuid, foreign key to `profiles.id`, **on delete cascade**, not null; `status` text not null; `job_title_searched`, `location_searched` text; `jobs_found` integer default 0; `started_at` timestamptz not null default `now()`; `completed_at` timestamptz | 1 to many with `jobs`, `agent_logs` |
-| `jobs` | `id` uuid primary key default `gen_random_uuid()`; `run_id` uuid, foreign key to `agent_runs.id`, **on delete cascade, not null** (changed from nullable); `user_id` uuid, foreign key to `profiles.id`, **on delete cascade**, not null; `source` text not null default `'search'` (the only value now, `url` removed); plus all other columns already listed in `architecture.md` (source_url, external_apply_url, title, company, location, salary, job_type, about_role, responsibilities text array, requirements text array, nice_to_have text array, benefits text array, about_company, match_score integer, match_reason, matched_skills text array, missing_skills text array, company_research jsonb, found_at timestamptz not null default `now()`) | many to 1 with `agent_runs`, `profiles`; 1 to many with `agent_logs.job_id` (optional) |
-| `agent_logs` | `id` uuid primary key default `gen_random_uuid()`; `run_id` uuid, foreign key to `agent_runs.id`, **on delete cascade**, not null; `user_id` uuid, foreign key to `profiles.id`, **on delete cascade**, not null; `message` text not null; `level` text not null; `job_id` uuid, foreign key to `jobs.id`, **on delete set null**, nullable; `created_at` timestamptz not null default `now()` | many to 1 with `agent_runs`, `profiles`, `jobs` |
+| `agent_runs` | `id` uuid primary key default `gen_random_uuid()`; `user_id` uuid, foreign key to `profiles.id`, **on delete cascade**, not null; `status` text not null, **check (status in ('running','completed','failed'))**; `job_title_searched`, `location_searched` text; `jobs_found` integer default 0; `started_at` timestamptz not null default `now()`; `completed_at` timestamptz | 1 to many with `jobs`, `agent_logs` |
+| `jobs` | `id` uuid primary key default `gen_random_uuid()`; `run_id` uuid, foreign key to `agent_runs.id`, **on delete cascade, not null** (changed from nullable); `user_id` uuid, foreign key to `profiles.id`, **on delete cascade**, not null; `source` text not null default `'search'`, **check (source = 'search')** (the only value now, `url` removed); plus all other columns already listed in `architecture.md` (source_url, external_apply_url, title, company, location, salary, job_type, about_role, responsibilities text array, requirements text array, nice_to_have text array, benefits text array, about_company, match_score integer, match_reason, matched_skills text array, missing_skills text array, company_research jsonb, found_at timestamptz not null default `now()`) | many to 1 with `agent_runs`, `profiles`; 1 to many with `agent_logs.job_id` (optional) |
+| `agent_logs` | `id` uuid primary key default `gen_random_uuid()`; `run_id` uuid, foreign key to `agent_runs.id`, **on delete cascade**, not null; `user_id` uuid, foreign key to `profiles.id`, **on delete cascade**, not null; `message` text not null; `level` text not null, **check (level in ('info','success','warning','error'))**; `job_id` uuid, foreign key to `jobs.id`, **on delete set null**, nullable; `created_at` timestamptz not null default `now()` | many to 1 with `agent_runs`, `profiles`, `jobs` |
 
 Indexes: one on every foreign key column above (`agent_runs.user_id`; `jobs.run_id`, `jobs.user_id`; `agent_logs.run_id`, `agent_logs.user_id`, `agent_logs.job_id`), plus `jobs(found_at desc)` and `jobs(match_score)` since `library-docs.md` already documents both as real sort orders the Find Jobs page uses.
 
@@ -109,7 +109,7 @@ This spec creates tables and storage only; no application endpoints. The Server 
 | Insert an agent_logs row | `user_id`, `run_id` | Carried forward from the run already in progress when the log line is written |
 
 **Key invariants**:
-- `jobs.source` is always `'search'`; the database default enforces this until a future feature needs another value
+- `jobs.source` is always `'search'`; a `check` constraint enforces this, not only the column default (a default alone would not stop an explicit insert of another value), until a future feature needs another value
 - Every `jobs` and `agent_logs` row belongs to exactly one `agent_runs` row; there is no "orphan" job or log with no run
 - A row's `user_id` always equals the id of the `profiles` row that owns it; row level security enforces this is also true for every read and write, not only inserts
 
@@ -129,11 +129,11 @@ None. This uses the InsForge project already configured (`NEXT_PUBLIC_INSFORGE_U
 
 No UI is involved in this feature, so the project's usual UI first build approach does not apply here; this is a single backend setup step, done in one pass rather than sliced.
 
-1. Create the `profiles`, `agent_runs`, `jobs`, `agent_logs` tables with the columns, types, foreign keys, and cascade behavior in `## Feature design`, satisfies **AC-1**, **AC-3**, **AC-4**, **AC-6**
+1. Create the `profiles`, `agent_runs`, `jobs`, `agent_logs` tables with the columns, types, foreign keys, and cascade behavior in `## Feature design`, including the `check` constraints on `jobs.source`, `agent_runs.status`, and `agent_logs.level` (a column default alone does not block an explicit insert of a disallowed value), satisfies **AC-1**, **AC-3**, **AC-4**, **AC-6**
 2. Add the indexes listed in `## Feature design`, satisfies **AC-1**
 3. Enable row level security and add the one policy per table described in `## Feature design`'s Security model, satisfies **AC-2**
 4. Create the private `resumes` storage bucket, satisfies **AC-5**
-5. Update `context/architecture.md`'s schema section and `context/progress-tracker.md` to reflect the resolved `source`/`run_id` change and mark this feature built, satisfies **AC-6**
+5. Update `context/architecture.md`: its schema section, AND its separate `## Invariants` line "jobs.source is always 'search' or 'url' — never any other value" (easy to miss since it is not next to the schema section), to reflect the resolved `source`/`run_id` change; also update `context/progress-tracker.md` to mark this feature built, satisfies **AC-6**
 
 ## Consequences
 

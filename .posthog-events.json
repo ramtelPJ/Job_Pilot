@@ -1,0 +1,37 @@
+[
+  {
+    "event_name": "sign_in_initiated",
+    "event_description": "A user clicked a Google or GitHub sign-in button and the OAuth redirect was issued.",
+    "file": "actions/auth.ts"
+  },
+  {
+    "event_name": "sign_in_completed",
+    "event_description": "A user successfully completed the OAuth callback and a session was created.",
+    "file": "app/api/auth/callback/route.ts"
+  },
+  {
+    "event_name": "sign_in_failed",
+    "event_description": "The OAuth callback failed (missing code or a failed code exchange).",
+    "file": "app/api/auth/callback/route.ts"
+  },
+  {
+    "event_name": "sign_out",
+    "event_description": "A user signed out.",
+    "file": "actions/auth.ts"
+  },
+  {
+    "event_name": "cta_clicked",
+    "event_description": "A marketing CTA link was clicked (Navbar's 'Start for free').",
+    "file": "components/layout/Navbar.tsx"
+  },
+  {
+    "event_name": "cta_clicked",
+    "event_description": "A marketing CTA link was clicked (Hero's 'Get Started' or 'Find Your First Match').",
+    "file": "components/homepage/Hero.tsx"
+  },
+  {
+    "event_name": "cta_clicked",
+    "event_description": "A marketing CTA link was clicked (bottom CTA section's 'Get Started' or 'Find Your First Match').",
+    "file": "components/homepage/CTASection.tsx"
+  }
+]

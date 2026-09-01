@@ -9,7 +9,7 @@
 | Cloud browser                  | Browserbase              | Company research — browsing company public pages |
 | AI browser control             | Stagehand                | Company page interaction and content extraction  |
 | Job Discovery                  | Adzuna API               | Job search and discovery                         |
-| AI model                       | OpenAI GPT-4o            | Matching, research synthesis, extraction         |
+| AI model                       | Claude (Anthropic API)   | Matching, research synthesis, extraction         |
 | Analytics                      | PostHog                  | Event tracking and dashboard charts              |
 | PDF generation                 | @react-pdf/renderer      | Resume PDF rendering                             |
 | Styling                        | Tailwind CSS + shadcn/ui | UI components and styling                        |
@@ -40,30 +40,30 @@
 │   │   └── login/
 │   │       └── page.tsx                   → Login page (Google + GitHub buttons, Server Component)
 │   ├── dashboard/
-│   │   └── page.tsx                       → Main dashboard
+│   │   └── page.tsx                       → Built (Feature 14/15/16/17). Async Server Component — real auth + profile-completion banner, real StatsBar aggregates, real RecentActivity, real charts (all data real end to end)
 │   ├── profile/
 │   │   └── page.tsx                       → Profile form + resume management
 │   ├── find-jobs/
-│   │   ├── page.tsx                       → Find Jobs page — search controls + jobs list
+│   │   ├── page.tsx                       → Built. Find Jobs page — search controls + real, filtered/sorted/paginated jobs list (searchParams-driven, Feature 11)
 │   │   └── [id]/
-│   │       └── page.tsx                   → Individual job details page
+│   │       └── page.tsx                   → Built (Feature 12). Fetches one real job row (RLS + explicit user_id filter), notFound() if absent, renders all job-details/ components
 │   └── api/
 │       ├── auth/
 │       │   ├── callback/route.ts          → OAuth code exchange (PKCE) + cookie-setting + redirect
 │       │   └── refresh/route.ts           → Access-token refresh endpoint (createRefreshAuthRouter)
 │       ├── agent/
-│       │   ├── find/route.ts              → Trigger Adzuna job discovery
-│       │   └── research/route.ts          → Trigger company research agent
+│       │   ├── find/route.ts              → Built (Feature 10). Auth + profile gate, agent_runs lifecycle, discoverJobs(), PostHog events
+│       │   └── research/route.ts          → Built (Feature 13). Auth + ownership check, loads job+profile, researchCompany(), saves jobs.company_research + jobs.researched_at (Feature 16), PostHog event
 │       ├── resume/
-│       │   ├── generate/route.ts          → Generate base resume PDF from profile
-│       │   └── extract/route.ts           → Extract profile data from uploaded resume PDF
+│       │   ├── generate/route.ts          → Built. Claude writes summary + bullets, @react-pdf/renderer renders, uploaded to storage
+│       │   └── extract/route.ts           → Built. pdf-parse + Claude structured extraction (Feature 07)
 ├── proxy.ts                                → Next.js 16 proxy (formerly middleware.ts) — session refresh + route protection
 ├── agent/
-│   ├── adzuna.ts                          → Adzuna API job discovery + GPT-4o scoring
-│   ├── research.ts                        → Company research — Browserbase + Stagehand + GPT-4o
-│   ├── matcher.ts                         → GPT-4o job matching logic
-│   ├── extractor.ts                       → GPT-4o job description extraction + structuring
-│   └── types.ts                           → Agent-specific TypeScript types
+│   ├── adzuna.ts                          → Built. discoverJobs() orchestrates search → score → save, skip-and-log on one bad job. Scores concurrently (Promise.all) — sequential scoring was a real reported perf bug. mapJobRow() now imported from lib/jobs.ts
+│   ├── matcher.ts                         → Built. scoreJob() — one Claude call per job, effort:"low"
+│   ├── log.ts                             → Built. logAgentError() — resolves current user itself, never throws
+│   ├── research.ts                        → Built (Feature 13). researchCompany() — deriveHomepageUrl() (redirect-follow + subdomain-strip, company-name fallback), Stagehand homepage+sub-page extraction (max 3), Claude synthesis (effort:"low", max_tokens 4096, no temperature)
+│   └── extractor.ts                       → Structured job description fields (responsibilities/requirements/benefits) — not built, no feature assigns it work yet
 ├── actions/
 │   ├── auth.ts                            → signInWithOAuth() + signOut() Server Actions
 │   ├── profile.ts                         → Profile save + update
@@ -78,33 +78,47 @@
 │   │   ├── HowItWorks.tsx
 │   │   └── Features.tsx
 │   ├── dashboard/
-│   │   ├── StatsBar.tsx
-│   │   ├── RecentActivity.tsx
-│   │   └── AnalyticsCharts.tsx
+│   │   ├── IncompleteProfileBanner.tsx    → Built (Feature 14). Real data, not mock — reuses lib/profile-completion.ts, shown when computeProfileCompletion(profile).isComplete is false
+│   │   ├── StatsBar.tsx                   → Built (Feature 15). Real data — 4 parallel queries in app/dashboard/page.tsx (count/count/count/avg), no fabricated trend badges
+│   │   ├── RecentActivity.tsx             → Built (Feature 16). Real data — merges completed agent_runs + researched jobs (jobs.researched_at, new column), sorted, top 5. Only 2 dot colors now (info/success); accent/"resume tailored" dropped, no agent produces that event
+│   │   ├── ChartCard.tsx                  → Built. Shared title+card shell for the three chart components below
+│   │   ├── EmptyChartState.tsx            → Built (Feature 17). Shared empty-state block for all three charts below
+│   │   ├── JobsFoundChart.tsx             → Built (Feature 17). Real data — recharts LineChart, fed by lib/posthog-query.ts's getJobsFoundSeries() (last 30 days, zero-filled)
+│   │   ├── MatchScoreChart.tsx            → Built (Feature 17). Real data — recharts BarChart, fed by getMatchScoreDistribution() (5 fixed ranges, all-time)
+│   │   └── CompanyResearchChart.tsx       → Built (Feature 17). Real data — recharts BarChart, fed by getCompanyResearchSeries() (last 7 days, zero-filled). Replaces the deleted ResumeTailoringChart.tsx — no event ever backed a "resume tailored" concept
 │   ├── profile/
-│   │   ├── ProfileForm.tsx
-│   │   ├── ResumeUpload.tsx
-│   │   ├── ResumePreview.tsx
-│   │   └── CompletionIndicator.tsx
+│   │   ├── ProfileForm.tsx                → State owner; submits ResumeUpload's file + all fields in one Server Action call
+│   │   ├── ResumeUpload.tsx               → Controlled (resumePdfUrl, onFileSelected), rendered inside ProfileForm's <form>
+│   │   ├── SkillsInput.tsx                → Controlled tag input, reused for Skills + Industries
+│   │   ├── WorkExperienceSection.tsx      → Controlled, up to 3 roles
+│   │   └── CompletionIndicator.tsx        → Presentational only, percentage/missingFields computed server-side
 │   ├── find-jobs/
 │   │   ├── SearchControls.tsx
 │   │   ├── JobsTable.tsx
 │   │   ├── JobFilters.tsx
 │   │   └── JobsPagination.tsx
-│   └── job-details/
-│       ├── JobInfo.tsx
-│       ├── MatchScore.tsx
-│       ├── JobDescription.tsx
-│       ├── CompanyResearch.tsx
-│       └── JobActions.tsx
+│   ├── job-details/
+│   │   ├── JobHeader.tsx                  → Built (Feature 12). Logo placeholder, title, company, match-score badge (2-tier: ui-tokens.md's Status Badges rule, not the 3-tier bar-color rule), View Job Post link
+│   │   ├── JobInfoCards.tsx               → Built. Salary/Location/Job Type/Date Found — 4-card row, colored icon squares per design
+│   │   ├── MatchReasoning.tsx             → Built. Renders job.matchReason verbatim
+│   │   ├── SkillsComparison.tsx           → Built. matchedSkills (green) vs missingSkills (accent-muted, per ui-tokens.md's Skills Badges table — not red/orange as build-plan prose suggested)
+│   │   ├── JobDescription.tsx             → Built. Renders job.aboutRole (raw Adzuna description) — no structured fields, agent/extractor.ts stays unbuilt
+│   │   └── CompanyResearch.tsx            → Built (Feature 13). "use client" — wired to POST /api/agent/research, inline loading state, renders all 9 dossier fields when present, empty state otherwise. Re-research allowed (always overwrites)
+│   └── resume/
+│       └── ResumePDF.tsx                  → @react-pdf/renderer Document, server-only. Called as a plain function (ResumePDF({...})), never JSX — keeps app/api/resume/generate/route.ts a .ts file, not .tsx
 ├── lib/
 │   ├── insforge-client.ts                 → InsForge browser client instance
 │   ├── insforge-server.ts                 → InsForge server client
-│   ├── browserbase.ts                     → Browserbase session creation + management
-│   ├── stagehand.ts                       → Stagehand initialisation with Browserbase session
-│   ├── adzuna.ts                          → Adzuna API client
+│   ├── browserbase.ts                     → Built (Feature 13). launchBrowserbaseSession() — browserbase.launch() from @browserbasehq/stagehand, not a separate @browserbasehq/sdk client
+│   ├── stagehand.ts                       → Built (Feature 13). createStagehand() — model: anthropic/claude-sonnet-5 (Stagehand's own catalog doesn't yet list claude-opus-5)
+│   ├── adzuna.ts                          → Built. searchJobs() + detectCountry() keyword heuristic (Feature 10)
 │   ├── posthog-server.ts                  → getPostHogClient() — posthog-node singleton, flushAt:1/flushInterval:0
-│   └── utils.ts                           → Shared utility functions
+│   ├── posthog-query.ts                   → Built (Feature 17). Reads PostHog data back via the Query API (HogQL), not posthog-node (capture-only, no query method). getJobsFoundSeries()/getMatchScoreDistribution()/getCompanyResearchSeries() — never throw, empty result on any failure
+│   ├── profile-completion.ts              → computeProfileCompletion() — derived, never stored (only is_complete is a real column)
+│   ├── profile.ts                         → Built (Feature 10). mapRowToProfile()/emptyProfile()/ProfileRow — extracted from app/profile/page.tsx so app/api/agent/find/route.ts can share it
+│   ├── jobs.ts                            → Built (Feature 12). mapJobRow() — extracted from agent/adzuna.ts so app/find-jobs/[id]/page.tsx can share it
+│   ├── claude.ts                          → getClaudeClient() — @anthropic-ai/sdk singleton
+│   └── utils.ts                           → Built. MATCH_THRESHOLD=70, JOBS_PAGE_SIZE=20 (Feature 11), formatRelativeTime()
 ├── components/
 │   └── analytics/
 │       ├── TrackedLink.tsx                → Client Component — Link + posthog.capture("cta_clicked") on click
@@ -154,7 +168,7 @@ Calls agent/adzuna.ts
         ↓
 Adzuna API returns job listings
         ↓
-GPT-4o scores each job against user profile
+Claude scores each job against user profile
         ↓
 Agent writes results to InsForge DB
         ↓
@@ -174,7 +188,7 @@ Single Browserbase session opens with Stagehand
         ↓
 Navigates to company homepage + sub pages
         ↓
-GPT-4o synthesizes dossier from extracted content
+Claude synthesizes dossier from extracted content
         ↓
 Dossier saved to jobs.company_research
         ↓
@@ -188,7 +202,7 @@ User uploads resume or clicks Generate
         ↓
 API route in app/api/resume/
         ↓
-GPT-4o processes content
+Claude processes content
         ↓
 @react-pdf/renderer renders PDF buffer
         ↓
@@ -267,7 +281,7 @@ Built. See `docs/specs/0001-core-data-schema.md` for the full decision record (w
 | benefits           | text[]      | Optional                                       |
 | about_company      | text        | Brief company description                      |
 | match_score        | integer     | 0-100 scored against main profile              |
-| match_reason       | text        | GPT-4o explanation                             |
+| match_reason       | text        | Claude explanation                             |
 | matched_skills     | text[]      | Skills user has that match                     |
 | missing_skills     | text[]      | Skills user lacks                              |
 | company_research   | jsonb       | Company dossier from research agent            |
@@ -440,7 +454,7 @@ try {
   await page.waitForLoadState("networkidle");
   const content = await stagehand.extract({ instruction: "..." });
 } catch (error) {
-  // Log and continue — GPT-4o will synthesize from what was found
+  // Log and continue — Claude will synthesize from what was found
   await logAgentError(jobId, error);
 }
 
@@ -460,7 +474,7 @@ Rules the AI agent must never violate:
 - All InsForge server-side writes use `createInsforgeServer()` — never the browser client.
 - No hardcoded hex values or raw Tailwind color classes in components — use CSS variables from ui-tokens.md.
 - Every Stagehand action is wrapped in try/catch. Failures are logged to agent_logs, never thrown to crash the run.
-- Company research always returns a dossier — even if browser research fails, GPT-4o synthesizes from company name and job description alone. Never return empty.
+- Company research always returns a dossier — even if browser research fails, Claude synthesizes from company name and job description alone. Never return empty.
 - Browserbase sessions are always closed with stagehand.close() when done — never leave sessions open.
 - Always scope InsForge queries to the current user_id — never query without a user filter.
 - Adzuna API always includes category=it-jobs — never search without this filter.

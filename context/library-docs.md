@@ -246,225 +246,151 @@ const jobRecord = {
 - Never pass `where` if location is empty — omit the parameter entirely
 - `source` is always `'search'` for Adzuna jobs — never any other value
 - `salary_is_predicted: "1"` means Adzuna estimated the salary — this is normal
-- Adzuna description is a snippet — GPT-4o scores from it, not a full description
+- Adzuna description is a snippet — Claude scores from it, not a full description
 - Default country to `'us'` — support `gb`, `au`, `ca` as alternatives
 
 ---
 
-## Browserbase
+## Browserbase + Stagehand
 
-**Check first:** Check AGENTS.md for an installed Browserbase skill. If a Browserbase MCP server is configured — use it. The skill/MCP will have the latest session management and API patterns.
+**Verified end-to-end (Feature 13 — real Browserbase session, real company site, real Claude synthesis).** The pattern below replaces an earlier draft that assumed a completely different, older API (`new Stagehand({ env, browserbaseSessionID, ... })`, `stagehand.context.activePage()`, `extract({ instruction, schema })` as one object argument). The installed version (`@browserbasehq/stagehand` v4) works differently — confirmed by reading its real `.d.mts` type definitions and running the actual pipeline, not from training data.
 
-### Session Creation — Company Research
+### Two critical gotchas before writing any code here
+
+1. **Zod version must match exactly, or `extract()`'s schema overload silently fails to type-check.** Stagehand v4 bundles its own `zod` (pinned to an exact patch version, e.g. `4.4.3`) as a dependency. If the project's own top-level `zod` is a different version, TypeScript treats the two `ZodType`s as structurally incompatible ("`_zod.version.minor` types are incompatible") and `stagehand.extract(instruction, schema)` silently falls back to its untyped single-argument overload, returning `{ extraction: string }` instead of your schema's shape. **Fix: pin the project's own `zod` dependency in `package.json` to the exact version Stagehand's own `package.json` declares** (check `node_modules/@browserbasehq/stagehand/package.json`'s `dependencies.zod`), not a caret range. This dedupes to one shared copy across the whole `node_modules` tree.
+2. **Bundling breaks Stagehand's own asset resolution under Turbopack.** Stagehand resolves its bundled browser-extension assets relative to its own module location at runtime (`new URL("../", import.meta.url)`). If Next.js bundles it into a route's own Turbopack chunk, that relative path breaks with `Module not found: Can't resolve '../'`. **Fix: add `"@browserbasehq/stagehand"` to `serverExternalPackages` in `next.config.ts`** — same class of fix as `pdf-parse` above.
+
+### Launching a session and creating Stagehand
 
 ```typescript
-import Browserbase from "@browserbasehq/sdk";
+// lib/browserbase.ts
+import { browserbase, type StagehandBrowser } from "@browserbasehq/stagehand";
 
-const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY! });
-
-// Single session for company research — sequential page visits
-const session = await bb.sessions.create({
-  projectId: process.env.BROWSERBASE_PROJECT_ID!,
-  timeout: 120, // 2 minute session — visits 3-4 pages max
-});
+export async function launchBrowserbaseSession(): Promise<StagehandBrowser> {
+  return browserbase.launch({
+    apiKey: process.env.BROWSERBASE_API_KEY!,
+    projectId: process.env.BROWSERBASE_PROJECT_ID!,
+    api_timeout: 180, // seconds — NOT `timeout`; minimum 60, comfortably covers homepage + 3 sub-pages
+  });
+}
 ```
 
-**Important — Browserbase runs independently from your Next.js server:**
-Browserbase sessions run on Browserbase's cloud infrastructure, not inside your Next.js API route. The API route triggers the Browserbase session and returns a response while the session continues running independently on Browserbase's platform. Do not add `maxDuration` or any timeout configuration to Next.js API routes to accommodate Browserbase session length.
+```typescript
+// lib/stagehand.ts
+import { Stagehand, type StagehandBrowser } from "@browserbasehq/stagehand";
+
+export async function createStagehand(browser: StagehandBrowser): Promise<Stagehand> {
+  return Stagehand.create({
+    browser,
+    model: {
+      // Stagehand's own model catalog (its internal act/extract/observe reasoning —
+      // separate from this project's own Claude calls via lib/claude.ts) does not
+      // yet list "claude-opus-5". "claude-sonnet-5" is the newest Anthropic model
+      // it does support — verify Stagehand's ModelNameSchema in its .d.mts if this
+      // ever needs revisiting, since its catalog is independent of Anthropic's own.
+      modelName: "anthropic/claude-sonnet-5",
+      apiKey: process.env.CLAUDE_API_KEY,
+    },
+  });
+}
+```
+
+`browserbase.launch()` both creates the Browserbase session AND returns the connected `StagehandBrowser` — there's no separate `@browserbasehq/sdk` session-creation step needed for this flow (that package is still a direct dependency since `browserbase.launch()`'s options type is `Browserbase.SessionCreateParams` under the hood, but you never construct its client directly here).
+
+### Using a page and extract()
+
+```typescript
+const [page] = await browser.context.pages();
+await page.goto(homepageUrl);
+
+const result = await stagehand.extract(
+  "Instruction string as the FIRST argument, not an { instruction, schema } object.",
+  z.object({
+    oneLiner: z.string(),
+    // ...
+  }),
+);
+
+const data = result.data; // already parsed against your schema — not result itself
+```
+
+`extract()` takes the instruction and schema as **two separate positional arguments**, and returns `{ data, ... }` — the parsed object is under `.data`, not the top-level result.
+
+### act() and cleanup
+
+```typescript
+try {
+  await stagehand.act("Click the About link in the navigation");
+} catch (error) {
+  await logAgentError(runId, jobId, error);
+}
+
+// Cleanup — call both, each independently guarded so a cleanup failure
+// never masks the real error or crashes the route:
+await stagehand.close().catch(() => {});
+await browser.close().catch(() => {});
+```
 
 **Rules:**
 
-- Always use single sessions — never parallel sessions (free plan limit)
-- Session timeout is 120 seconds — sufficient for 3-4 page visits
-- Always end sessions cleanly — call stagehand.close() when done
+- Always use `extract()` with a Zod schema — never parse raw HTML or use regex
+- Always wrap every `act()` and `extract()` in try/catch
+- Always call both `stagehand.close()` and `browser.close()` in a `finally` block — never leave a session open even if research fails
+- Single session per research run — never parallel sessions
+- Max 3 sub-pages — prefer about/engineering/blog/product over careers
 - Project ID always from `process.env.BROWSERBASE_PROJECT_ID` — never hardcode
-- Browserbase client lives in `lib/browserbase.ts` — always import from there
+- **A `pageLinks`-style schema field must explicitly say "the real href/URL attribute, not the visible link text"** — without that, the model returns display labels like `"Careers"` or `"Blog"` instead of navigable URLs, which silently breaks every sub-page visit (confirmed by real testing: the first pass returned link text, not hrefs, and `new URL("Careers", homepage)` resolved to a plausible-looking but wrong guess)
+- Browserbase sessions run on Browserbase's own cloud infrastructure, not inside the Next.js process — do not add `maxDuration` or route-level timeout config to accommodate session length
+- Real-world latency for a content-rich site (multiple sub-pages actually found and visited) can run close to two minutes, not the 20-60 seconds one might assume from a simple 1-page case — size any client-side timeout or loading-state copy accordingly
 
----
+### Company Research Pattern (Feature 13)
 
-## Stagehand
-
-**Check first:** Check AGENTS.md for an installed Stagehand skill. If a Stagehand MCP server is configured — use it. The skill/MCP will have the latest act() and extract() patterns.
-
-### Initialisation
+Three-step process: homepage extraction → sub-page extraction → Claude synthesis. Job description and user profile come from DB — never re-fetch what you already have. Browser's only job is the company website.
 
 ```typescript
-import { Stagehand } from "@browserbasehq/stagehand";
-
-const stagehand = new Stagehand({
-  env: "BROWSERBASE",
-  apiKey: process.env.BROWSERBASE_API_KEY!,
-  projectId: process.env.BROWSERBASE_PROJECT_ID!,
-  browserbaseSessionID: session.id,
-  model: { modelName: "openai/gpt-4o", apiKey: process.env.OPENAI_API_KEY! },
-  disablePino: true,
-});
-
-await stagehand.init();
-const page = stagehand.context.activePage()!;
-```
-
-### extract()
-
-```typescript
-import { z } from "zod";
-
-const result = await stagehand.extract({
-  instruction:
-    "Extract the company overview, main product description, and any technology mentions from this page.",
-  schema: z.object({
-    companyOverview: z.string().optional(),
-    mainProduct: z.string().optional(),
-    techMentions: z.array(z.string()).optional(),
-    navLinks: z
-      .array(
-        z.object({
-          label: z.string(),
-          url: z.string(),
-        }),
-      )
-      .optional(),
-  }),
-});
-```
-
-### act()
-
-```typescript
-// Always wrap in try/catch
-try {
-  await stagehand.act({
-    action: "Click the About link in the navigation",
-  });
-} catch (error) {
-  await logAgentError(jobId, null, error);
-}
-```
-
-## Company Research Section
-
-Replace the existing Stagehand "Company Research Pattern" section in library-docs.md with this:
-
----
-
-### Company Research Pattern
-
-Three-step process: homepage extraction → sub-page extraction → GPT-4o synthesis.
-Job description and user profile come from DB — never re-fetch what you already have.
-Browser's only job is the company website.
-
-```typescript
-// Step 1 — Homepage extraction
-const homepageData = await stagehand.extract({
-  instruction:
-    "This is a company's homepage. Capture what the company actually does, who it's for, and any concrete signals (funding, customers, scale, mission, recent launches). Then find the internal links most worth visiting to research them as an employer.",
-  schema: z.object({
+const homepage = await stagehand.extract(
+  "This is a company's homepage. Capture what the company actually does, who it's for, and any concrete signals (funding, customers, scale, mission, recent launches). Then find the internal links most worth visiting to research them as an employer — return each link's real href/URL attribute, not its visible label text.",
+  z.object({
     oneLiner: z.string().describe("What the company does in one sentence"),
-    productSummary: z
-      .string()
-      .describe("What they build/sell and who it's for"),
-    signals: z
-      .array(z.string())
-      .describe("Funding, notable customers, scale, mission, recent news"),
-    pageLinks: z
-      .array(
-        z.object({
-          url: z.string(),
-          kind: z.enum([
-            "about",
-            "careers",
-            "blog",
-            "engineering",
-            "product",
-            "team",
-            "other",
-          ]),
-        }),
-      )
-      .describe("Internal links worth visiting"),
+    productSummary: z.string().describe("What they build/sell and who it's for"),
+    signals: z.array(z.string()).describe("Funding, notable customers, scale, mission, recent news"),
+    pageLinks: z.array(
+      z.object({
+        url: z.string().describe("The link's actual href/URL attribute, never the visible text"),
+        kind: z.enum(["about", "careers", "blog", "engineering", "product", "team", "other"]),
+      }),
+    ),
   }),
-});
+);
 
-// If oneLiner and productSummary are empty — wrong site or parked domain
-// Skip to synthesis with job description and profile only
-if (!homepageData.oneLiner && !homepageData.productSummary) {
-  await stagehand.close();
-  // proceed to synthesis with empty companyResearch
+// If oneLiner and productSummary are both empty, OR the extract/navigation call itself
+// throws — bail to synthesis with job description and profile only. Same fallback path
+// for both cases, not two separate ones.
+if (!homepage.data.oneLiner && !homepage.data.productSummary) {
+  // proceed to synthesis with companyResearch = null
 }
 
-// Step 2 — Sub-page extraction (max 3, prefer about/blog/engineering/product over careers)
-const subPageData = await stagehand.extract({
-  instruction:
-    "Extract substance that helps a candidate understand this company before applying: what they do, their values and how they work, the specific technologies and tools they use, notable projects or customers, and how the team operates. Ignore nav, footers, cookie banners, and generic marketing copy.",
-  schema: z.object({
+// Sub-page extraction (max 3, prefer about/engineering/blog/product over careers).
+// Resolve relative hrefs against the homepage URL before navigating:
+const url = new URL(link.url, homepageUrl).toString();
+await page.goto(url);
+const subPage = await stagehand.extract(
+  "Extract substance that helps a candidate understand this company before applying: what they do, their values and how they work, the specific technologies and tools they use, notable projects or customers, and how the team operates. Ignore nav, footers, cookie banners, and generic marketing copy.",
+  z.object({
     keyPoints: z.array(z.string()),
-    technologies: z
-      .array(z.string())
-      .describe("Specific languages, frameworks, tools, platforms"),
-    valuesOrCulture: z
-      .array(z.string())
-      .describe("Stated values, working style, team norms"),
-    notable: z
-      .array(z.string())
-      .describe("Customers, funding, scale, projects, awards"),
+    technologies: z.array(z.string()).describe("Specific languages, frameworks, tools, platforms"),
+    valuesOrCulture: z.array(z.string()).describe("Stated values, working style, team norms"),
+    notable: z.array(z.string()).describe("Customers, funding, scale, projects, awards"),
   }),
-});
-
-// Step 3 — GPT-4o synthesis (after browser closes)
-// Feed three data sources: company research + job from DB + profile from DB
-const systemPrompt = `You are a sharp career strategist preparing a candidate to apply for a specific role. You are given (a) research collected from the company's own website, (b) the job posting, and (c) the candidate's profile. Produce a concise, concrete briefing that gives this specific candidate an edge for this specific role.
-
-Rules:
-- Ground every company claim in the provided research or job posting. Never invent funding, customers, headcount, or facts. If research was thin, infer carefully from the job posting and say what's inferred.
-- Be specific to THIS candidate. Connect their actual skills and past work to this company's stack, product, and values. No generic advice that would apply to anyone.
-- Turn the candidate's missing skills into a strategy: how to frame the gap honestly and what adjacent experience to lean on.
-- Talking points and questions must reference real things from the research, the kind of detail that signals the candidate did their homework.
-- Keep every item tight: one or two sentences. No fluff.
-
-Return ONLY valid JSON matching this shape:
-{
-  "companyOverview": string,
-  "techStack": string[],
-  "culture": string[],
-  "whyThisRole": string,
-  "yourEdge": string[],
-  "gapsToAddress": string[],
-  "smartQuestions": string[],
-  "interviewPrep": string[],
-  "sources": string[]
-}`;
-
-const userPrompt = `COMPANY RESEARCH (from their website):
-${JSON.stringify(companyResearch)}
-
-JOB POSTING:
-Title: ${job.title}
-Company: ${job.company}
-Description: ${job.description}
-Matched skills (already computed): ${job.matched_skills.join(", ")}
-Missing skills (already computed): ${job.missing_skills.join(", ")}
-
-CANDIDATE PROFILE:
-Current title: ${profile.current_title}
-Experience: ${profile.years_experience} years, level ${profile.experience_level}
-Skills: ${profile.skills.join(", ")}
-Work history: ${JSON.stringify(profile.work_experience)}`;
-
-const response = await openai.chat.completions.create({
-  model: "gpt-4o",
-  response_format: { type: "json_object" },
-  temperature: 0.4,
-  messages: [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: userPrompt },
-  ],
-});
+);
 ```
+
+Claude synthesis runs after the browser session is fully closed, via `client.messages.parse()` (see the Claude section below) — not a hand-rolled `openai.chat.completions.create()` call. `sources` is assembled by code from the URLs actually visited (homepage + each successfully read sub-page), never written by the model itself — this keeps the field honest even if the model would otherwise paraphrase or invent a page reference.
 
 **Dossier fields:**
 
 | Field           | Type     | Purpose                                             |
-| --------------- | -------- | --------------------------------------------------- |
+| --------------- | -------- | ---------------------------------------------------- |
 | companyOverview | string   | What the company does                               |
 | techStack       | string[] | Technologies they use                               |
 | culture         | string[] | Values and working style                            |
@@ -473,71 +399,94 @@ const response = await openai.chat.completions.create({
 | gapsToAddress   | string[] | Missing skills reframed as strategy                 |
 | smartQuestions  | string[] | Questions that show real research                   |
 | interviewPrep   | string[] | Topics to prepare for this role                     |
-| sources         | string[] | Pages the company info came from                    |
+| sources         | string[] | Real URLs the browser actually visited, assembled by code |
 
 **Rules:**
 
-- Always use `extract()` with a Zod schema — never parse raw HTML or use regex
-- Always wrap every `act()` and `extract()` in try/catch
-- Always call `await stagehand.close()` when done — ends the Browserbase session
-- Model is always `gpt-4o` — never use other models
-- Temperature is `0.4` for synthesis — grounded but flexible enough to make real connections
-- Max 3 sub-pages — never exceed this on free plan
-- Always close session in finally block — never leave sessions open even if research fails
+- Model is always `claude-opus-5` for the synthesis call (via `lib/claude.ts`) — Stagehand's own internal page-reading model (`anthropic/claude-sonnet-5`, set in `lib/stagehand.ts`) is a separate, unrelated choice and does not change this
+- No `temperature` — same hard constraint as every other Claude call in this project; grounding comes from the system prompt's explicit rules plus `output_config.effort: "low"`
+- **`max_tokens: 4096` for company research synthesis, not 2048** — confirmed by real testing: a content-rich company (multiple sub-pages successfully read) produces enough source material that Claude's own 8-field, several-bullet-list response genuinely needs the extra headroom; 2048 truncated mid-JSON and threw a parse error
+- Max 3 sub-pages — never exceed this
+- Always close both `stagehand` and `browser` in a `finally` block — never leave sessions open even if research fails
 - Job description and profile always come from DB — never re-fetch via browser
-- If browser research returns empty — still run synthesis with job + profile only
+- If browser research returns empty (or errors) — still run synthesis with job + profile only
 - yourEdge, gapsToAddress, and smartQuestions are the most valuable fields — never skip them
 
-## OpenAI GPT-4o
+## Claude (Anthropic API)
 
-**Check first:** Check AGENTS.md for an installed OpenAI skill. The skill will have the latest API patterns and model capabilities.
+**Check first:** Check AGENTS.md for an installed `claude-api` skill and load it before touching any Claude code — it corrected the pattern below (structured output via `.parse()` + Zod, not a hand-parsed JSON string; `temperature` is rejected on `claude-opus-5`, not just discouraged).
 
-### Structured JSON Response
+### Client
 
 ```typescript
-import OpenAI from "openai";
+// lib/claude.ts
+import Anthropic from "@anthropic-ai/sdk";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+let claudeClient: Anthropic | null = null;
 
-const response = await openai.chat.completions.create({
-  model: "gpt-4o",
-  response_format: { type: "json_object" },
-  temperature: 0.3,
-  messages: [
-    {
-      role: "system",
-      content: "You are a job matching assistant. Return only valid JSON.",
-    },
-    {
-      role: "user",
-      content: `Your prompt here`,
-    },
-  ],
-});
-
-const result = JSON.parse(response.choices[0].message.content!);
+export function getClaudeClient(): Anthropic {
+  if (!claudeClient) {
+    claudeClient = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+  }
+  return claudeClient;
+}
 ```
 
-**Temperature settings:**
+### Structured Output (`.parse()` + Zod)
 
-- `0.3` — matching, scoring, extraction, research synthesis — deterministic results
-- `0.7` — resume generation — natural variation
+Verified end-to-end (Feature 07 — real PDF, real API call): `client.messages.parse()` with `zodOutputFormat()` returns a `parsed_output` that's already validated against the schema — no manual `JSON.parse()`, no hand-written "return only valid JSON" prompting.
+
+```typescript
+import { z } from "zod";
+import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
+import { getClaudeClient } from "@/lib/claude";
+
+const ResultSchema = z.object({
+  matchScore: z.number(),
+  matchReason: z.string(),
+  matchedSkills: z.array(z.string()),
+  missingSkills: z.array(z.string()),
+});
+
+const claude = getClaudeClient();
+const response = await claude.messages.parse({
+  model: "claude-opus-5",
+  max_tokens: 1024,
+  output_config: {
+    format: zodOutputFormat(ResultSchema),
+    effort: "low", // deterministic scoring/extraction — not creative writing
+  },
+  system: "You are a job matching assistant.",
+  messages: [{ role: "user", content: "Your prompt here" }],
+});
+
+if (!response.parsed_output) {
+  // Claude declined to produce a schema-conforming response — handle as a failure, don't assume shape
+}
+const result = response.parsed_output; // already typed + validated, no JSON.parse
+```
+
+**`output_config.effort` (replaces `temperature` on `claude-opus-5`):**
+
+- `low` — matching, scoring, extraction, research synthesis — deterministic, cheapest
+- `medium`/`high` — resume generation — more natural phrasing, still not `xhigh`/`max` (no reasoning-heavy math here)
 
 **Max tokens:**
 
-- Job matching + scoring: `300`
-- Company research synthesis: `800`
-- Resume generation: `1000`
-- Profile extraction from resume: `800`
+- Job matching + scoring: `1024`
+- Company research synthesis: `4096` — measured, not assumed (Feature 13): `2048` truncated a real dossier mid-JSON on a content-rich company and threw a parse error
+- Resume generation: `4096`
+- Profile extraction from resume: `4096`
 
 **Rules:**
 
-- Model string is always `'gpt-4o'` — never use other model names
-- Always use `response_format: { type: 'json_object' }` for structured data
-- Always parse `response.choices[0].message.content` as string — even with json_object it returns a string
-- Always validate parsed JSON before using — wrap in try/catch
+- Model string is always `claude-opus-5` — this is the project's only model; never substitute Sonnet/Haiku/Fable without being asked
+- **Never pass `temperature`, `top_p`, or `top_k` to `claude-opus-5`** — sampling params are rejected (400) while adaptive thinking is on, which is the default on this model. Control determinism via `output_config.effort`, not sampling
+- Always use `client.messages.parse()` with a Zod schema for structured data — never `client.messages.create()` + manual `JSON.parse()` for anything that needs a guaranteed shape
+- Always check `response.parsed_output` is non-null before using it — a null means Claude didn't produce a schema-conforming response
 - Match threshold is always `MATCH_THRESHOLD` from `lib/utils.ts` — never hardcode 70
 - Company research synthesis must always return a complete dossier — never return empty even if browser research failed
+- `pdf-parse` is v2 — `import { PDFParse } from "pdf-parse"`, not the v1 `import pdf from "pdf-parse"` shape. `new PDFParse({ data: buffer }).getText()` returns `{ text }`; always `await parser.destroy()` in a `finally` block afterward to free memory
 
 ---
 
@@ -631,84 +580,99 @@ if (posthog) {
 
 ## @react-pdf/renderer
 
-**Check first:** Check AGENTS.md for an installed react-pdf skill. PDF generation APIs can differ from general training knowledge.
+**Verified working (Feature 08)** — `renderToBuffer` matches this exact signature (`(document: ReactElement<DocumentProps>) => Promise<Buffer>`), confirmed against the installed package's own `.d.ts` files. Already in Next.js's default `serverExternalPackages` list, so no `next.config.ts` change is needed for it (unlike `pdf-parse` — see below).
 
 ### Resume PDF Generation
 
-```typescript
-import { renderToBuffer } from '@react-pdf/renderer'
-import { Document, Page, Text, View, StyleSheet } from '@react-pdf/renderer'
+The Document component lives in its own `.tsx` file and is **called as a plain function, not JSX** — this keeps the API route a `.ts` file per `code-standards.md`'s "route files are always `route.ts`" convention.
+
+```tsx
+// components/resume/ResumePDF.tsx
+import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 
 const styles = StyleSheet.create({
-  page: { padding: 30, fontFamily: 'Helvetica' },
-  section: { marginBottom: 10 },
-  heading: { fontSize: 14, fontWeight: 'bold' },
-  text: { fontSize: 10 },
-})
+  page: { padding: 36, fontFamily: "Helvetica" },
+  name: { fontSize: 22, fontWeight: "bold" },
+  section: { marginTop: 16 },
+});
 
-const ResumePDF = ({ profile }: { profile: Profile }) => (
-  <Document>
-    <Page size="A4" style={styles.page}>
-      <View style={styles.section}>
-        <Text style={styles.heading}>{profile.fullName}</Text>
-        <Text style={styles.text}>{profile.email}</Text>
-      </View>
-    </Page>
-  </Document>
-)
+export function ResumePDF({ fullName, email }: { fullName: string; email: string }) {
+  return (
+    <Document>
+      <Page size="A4" style={styles.page}>
+        <Text style={styles.name}>{fullName}</Text>
+        <View style={styles.section}>
+          <Text>{email}</Text>
+        </View>
+      </Page>
+    </Document>
+  );
+}
+```
 
-// Generate buffer
-const buffer = await renderToBuffer(<ResumePDF profile={profile} />)
+```typescript
+// app/api/resume/generate/route.ts — plain .ts, no JSX
+import { renderToBuffer } from "@react-pdf/renderer";
+import { ResumePDF } from "@/components/resume/ResumePDF";
 
-// Upload directly to InsForge Storage
-await insforge.storage
-  .from('resumes')
-  .upload(`${userId}/resume.pdf`, buffer, {
-    contentType: 'application/pdf',
-    upsert: true
-  })
+const buffer = await renderToBuffer(ResumePDF({ fullName, email }));
+
+// Wrap in a Blob before uploading — .upload() takes File | Blob, not a raw Buffer
+const blob = new Blob([new Uint8Array(buffer)], { type: "application/pdf" });
+const { data, error } = await insforge.storage.from("resumes").upload(`${userId}/resume.pdf`, blob);
+// data.url is the new public URL — save it to profiles.resume_pdf_url
 ```
 
 **Supported CSS properties:**
 Only use these — others are silently ignored:
 `padding, margin, fontSize, color, fontFamily, flexDirection, alignItems, justifyContent, borderRadius, width, height, fontWeight, textAlign, lineHeight`
 
+No `gap` and no `border*` properties in this list — use `marginBottom` on children for spacing, and typography/whitespace instead of divider lines.
+
 **Rules:**
 
 - Server-side only — never import in client components
 - Always use `renderToBuffer` — not `renderToStream` or `PDFDownloadLink`
 - PDF generation only in `app/api/resume/` routes
-- Generated buffer uploaded directly to InsForge Storage — never written to disk
-- Always save public URL to DB after upload
+- Generated buffer uploaded via storage's real signature: `.upload(path, blob)`, no options object — see the InsForge Storage section above (no `contentType`/`upsert` params exist)
+- Always save the returned `url` to `profiles.resume_pdf_url` after upload
 
 ---
 
 ## pdf-parse
 
-**Check first:** Check AGENTS.md for an installed pdf-parse skill.
+**Package note:** the installed version is v2, a full rewrite from the v1 API most training data recalls (`import pdf from 'pdf-parse'; await pdf(buffer)`). v2's real API is class-based. Verified working end-to-end in Feature 07 against a real PDF.
 
 ### Extract Text from Uploaded Resume
 
 ```typescript
-import pdf from "pdf-parse";
+import { PDFParse } from "pdf-parse";
 
-// In API route handling resume upload
+// In an API route handling resume upload
 export async function POST(req: NextRequest) {
   const formData = await req.formData();
-  const file = formData.get("resume") as File;
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  const file = formData.get("resumeFile") as File;
+  const buffer = Buffer.from(await file.arrayBuffer());
 
-  const pdfData = await pdf(buffer);
-  const extractedText = pdfData.text; // raw text content
+  const parser = new PDFParse({ data: buffer });
+  let extractedText: string;
+  try {
+    const result = await parser.getText();
+    extractedText = result.text.trim();
+  } finally {
+    await parser.destroy(); // always free memory, even on error
+  }
 
-  // Send to GPT-4o for structured extraction
+  // Send extractedText to Claude for structured extraction
 }
 ```
 
 **Rules:**
 
 - Server-side only — never import in client components
-- `pdfData.text` is raw unformatted text — GPT-4o handles the structure extraction
+- Construct with `new PDFParse({ data: buffer })` (a Buffer) or `{ url: '...' }` (a remote URL) — not a bare function call
+- `.getText()` returns `{ text, ... }` — `text` is raw unformatted content; Claude handles the structure extraction
+- **Always `await parser.destroy()` in a `finally` block** — v2 holds resources per-instance; skipping this leaks memory across requests
+- **`next.config.ts` must list `pdf-parse` in `serverExternalPackages`.** Without it, Turbopack bundles the route handler and rewrites the path `pdfjs-dist` uses to resolve its worker script at runtime, breaking every call with "Setting up fake worker failed" — a bundling problem, not a code bug, so no amount of try/catch around `getText()` fixes it. Only surfaces when hit through an actual Next.js route; a plain Node script (no bundler) never reproduces it
 - Always handle parse errors — some PDFs are image-based and return empty text
-- If `pdfData.text` is empty or very short — return error to user: "Could not extract text from this PDF. Please try a different file."
+- If the extracted text is empty or very short — return error to user: "Could not extract text from this PDF. Please try a different file."

@@ -255,11 +255,13 @@ All environment variables defined in `.env.local` for development. Never hardcod
 | `NEXT_PUBLIC_APP_URL`           | actions/auth.ts (OAuth `redirectTo` target) |
 | `BROWSERBASE_API_KEY`           | lib/browserbase.ts     |
 | `BROWSERBASE_PROJECT_ID`        | lib/browserbase.ts     |
-| `OPENAI_API_KEY`                | agent/ functions       |
+| `CLAUDE_API_KEY`                | lib/claude.ts, agent/ functions |
 | `ADZUNA_APP_ID`                 | lib/adzuna.ts          |
 | `ADZUNA_APP_KEY`                | lib/adzuna.ts          |
 | `NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN` | instrumentation-client.ts, lib/posthog-server.ts |
 | `NEXT_PUBLIC_POSTHOG_HOST`      | instrumentation-client.ts, lib/posthog-server.ts |
+| `POSTHOG_PERSONAL_API_KEY`      | lib/posthog-query.ts (server-only, Events API read access — never `NEXT_PUBLIC_`) |
+| `POSTHOG_PROJECT_ID`            | lib/posthog-query.ts (server-only) |
 
 `NEXT_PUBLIC_` prefix means the variable is exposed to the browser. Never add `NEXT_PUBLIC_` to secret keys.
 
@@ -316,14 +318,15 @@ Approved dependencies for this project:
 - `@insforge/sdk` — InsForge client (includes SSR helpers at the `/ssr` and `/ssr/middleware` subpaths — there is no separate `@insforge/ssr` package)
 - `@browserbasehq/sdk` — Browserbase sessions
 - `@browserbasehq/stagehand` — AI browser control
-- `openai` — GPT-4o API
+- `@anthropic-ai/sdk` — Claude API
 - `posthog-js` — PostHog browser client
 - `posthog-node` — PostHog server client
 - `@react-pdf/renderer` — Resume PDF generation
 - `pdf-parse` — Extract text from uploaded PDF
-- `zod` — Schema validation
+- `zod` — Schema validation. **Pinned to an exact version (`4.4.3`) in `package.json`, not a caret range** — `@browserbasehq/stagehand` bundles its own exact-pinned `zod`, and any version mismatch between the two makes TypeScript treat their `ZodType`s as incompatible, which silently breaks `stagehand.extract()`'s schema overload (see `library-docs.md`'s Browserbase + Stagehand section). Never bump this without re-checking Stagehand's own pinned version and keeping them identical.
 - `lucide-react` — Icons
 - `tailwindcss` — Styling
+- `recharts` — Dashboard analytics charts (Feature 17)
 - `shadcn/ui` components — UI primitives
 
 Do not install any other packages without updating this list first.

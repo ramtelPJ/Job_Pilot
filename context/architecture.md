@@ -52,8 +52,8 @@
 │       │   ├── callback/route.ts          → OAuth code exchange (PKCE) + cookie-setting + redirect
 │       │   └── refresh/route.ts           → Access-token refresh endpoint (createRefreshAuthRouter)
 │       ├── agent/
-│       │   ├── find/route.ts              → Built (Feature 10). Auth + profile gate, agent_runs lifecycle, discoverJobs(), PostHog events
-│       │   └── research/route.ts          → Built (Feature 13). Auth + ownership check, loads job+profile, researchCompany(), saves jobs.company_research + jobs.researched_at (Feature 16), PostHog event
+│       │   ├── find/route.ts              → Built (Feature 10). Auth + profile gate, agent_runs lifecycle, discoverJobs(), PostHog events. maxDuration=60 (pre-deploy prep)
+│       │   └── research/route.ts          → Built (Feature 13). Auth + ownership check, loads job+profile, researchCompany(), saves jobs.company_research + jobs.researched_at (Feature 16), PostHog event. maxDuration=300 (pre-deploy prep — measured 110-120s; Vercel Hobby's 60s hard cap means this route needs at least Pro)
 │       ├── resume/
 │       │   ├── generate/route.ts          → Built. Claude writes summary + bullets, @react-pdf/renderer renders, uploaded to storage
 │       │   └── extract/route.ts           → Built. pdf-parse + Claude structured extraction (Feature 07)

@@ -244,17 +244,17 @@ Real data. Slim horizontal alert bar (not `ProfilePage`'s big completion-ring `C
 
 Shared title + card shell (`rounded-2xl border border-border bg-surface p-6`) used by all three chart components below — pulled out once three components needed the identical wrapper, not a speculative abstraction.
 
-### ResumeTailoringChart / MatchScoreChart
+### EmptyChartState
 
-`components/dashboard/ResumeTailoringChart.tsx`, `components/dashboard/MatchScoreChart.tsx`
+`components/dashboard/EmptyChartState.tsx`
 
-Mock data — real wiring is Feature 17. Hand-rolled Tailwind bar charts (a fixed-height flex row with `height: {value/max}%` bars, labels in a separate row below — same mechanics `DashboardPreview`'s mock bar chart already proved), `bg-info` for Resume Tailoring Activity and `bg-success` for Match Score Distribution per `ui-tokens.md`'s Dashboard Chart Colors table. **No `recharts`** — not yet an approved dependency (`code-standards.md`); `build-plan.md`'s Feature 17 names it for the real-data version, so that's the natural point to decide on adding it.
+Shared empty-state block (`h-40`, centered, dashed border, `bg-surface-secondary`) used by all three chart components below when their data has no non-zero points — pulled out once three components needed the identical block, not a speculative abstraction. Per `ui-rules.md`'s "every section that can be empty must have an empty state" rule.
 
-### JobsFoundChart
+### JobsFoundChart / MatchScoreChart / CompanyResearchChart
 
-`components/dashboard/JobsFoundChart.tsx`
+`components/dashboard/JobsFoundChart.tsx`, `components/dashboard/MatchScoreChart.tsx`, `components/dashboard/CompanyResearchChart.tsx`
 
-Mock data — real wiring is Feature 17. Hand-rolled inline SVG (`preserveAspectRatio="none"`, fixed `700×160` viewBox stretched to fill width): `var(--color-accent)` stroke at 3px with a linear-gradient area fill fading from 20% to 0% opacity, three dashed `var(--color-border)` grid lines, a small circle marker per data point — matches `ui-tokens.md`'s Dashboard Chart Colors row for this chart exactly. Axis/day labels use `text-text-muted` rather than the doc's literal `#9CA3AF` (near-identical to `--color-text-muted`'s `#99A1AF`, almost certainly the same color exported slightly differently) — `ui-tokens.md`'s own "never hardcode hex" Invariant overrides its own Typography table's literal value here.
+**As of Feature 17, real data, rendered with `recharts`** — replaces both the Feature 14 mock versions and the hand-rolled Tailwind/SVG charts from before this feature. All three take real data as a prop (`DaySeriesPoint[]` or `MatchScoreBucket[]` from `lib/posthog-query.ts`) and pick between the real `recharts` chart and `EmptyChartState` based on whether any point has a non-zero count. `JobsFoundChart` is a `LineChart` (`var(--color-accent)` stroke, 3px, circle point markers with a `var(--color-surface)` fill so they read as "on" the line); `MatchScoreChart` and `CompanyResearchChart` are `BarChart`s (`var(--color-success)` and `var(--color-info)` fills respectively, per `ui-tokens.md`'s Dashboard Chart Colors table). All three share the same axis styling: no axis line, no tick line, `12px`/`text-text-muted` tick labels, a dashed `var(--color-border)` `CartesianGrid` with no vertical lines — matching the original hand-rolled charts' look as closely as `recharts`' own styling props allow. **`ResumeTailoringChart.tsx` is deleted**, not kept unused — no event in `code-standards.md`'s fixed PostHog event list ever backed a "resume tailored" concept, confirmed back in Feature 14 and again here; `CompanyResearchChart.tsx` takes its grid slot, per `build-plan.md`'s Feature 17 chart list. Recharts' `ResponsiveContainer` only measures and draws its inner SVG client side (no `ResizeObserver` during server rendering) — confirmed as expected, standard `recharts` + SSR behavior, not a bug, while verifying this feature.
 
 ## Cross-feature notes
 

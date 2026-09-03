@@ -6,6 +6,12 @@ import { mapRowToProfile, type ProfileRow } from "@/lib/profile";
 import { getPostHogClient } from "@/lib/posthog-server";
 import { MATCH_THRESHOLD } from "@/lib/utils";
 
+// Up to 10 jobs are scored concurrently (Claude calls in parallel), but on a
+// slow Adzuna response plus real network variance this can still run longer
+// than Vercel's default function timeout. Cheap insurance — see the deploy
+// guide for the plan-dependent cap this is still subject to.
+export const maxDuration = 60;
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();

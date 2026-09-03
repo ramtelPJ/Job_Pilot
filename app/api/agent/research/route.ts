@@ -6,6 +6,14 @@ import { mapRowToProfile, type ProfileRow } from "@/lib/profile";
 import { researchCompany } from "@/agent/research";
 import { getPostHogClient } from "@/lib/posthog-server";
 
+// Measured real-world latency (Feature 13): 110-120s for a content-rich
+// company (Browserbase session + up to 3 sub-page extracts + Claude
+// synthesis). Vercel's default function timeout (10-15s) would kill this
+// route long before it finishes. This only takes effect on a plan that
+// allows it — Hobby hard-caps at 60s regardless of this value, so this
+// route needs at least a Pro plan to complete reliably. See deploy guide.
+export const maxDuration = 300;
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
